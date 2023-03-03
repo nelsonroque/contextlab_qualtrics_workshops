@@ -1,0 +1,218 @@
+# Data Wrangling - Special considerations with survey data
+
+## Overview
+
+In this example, we will work with the `qualtRics` package to read in Qualtrics exports, and apply minimal pre-processing.
+
+```{r}
+install.packages("kableExtra")
+install.packages("tidyverse")
+install.packages("qualtRics")
+```
+
+## Load data
+
+Read in survey and split StartDate into two columns for easy filtering (we don't need pilot data)
+
+```{r}
+library(qualtRics)
+library(tidyverse)
+
+# set filename of survey file
+fn = "../data/demo_qualtrics_export.csv"
+
+# filter out pilot data
+PILOT_START_DATE = as.Date("2023-03-01")
+qualtrics_df <- read_survey(fn) %>%
+  separate(StartDate, into=c("dt_date", "dt_time"), sep=" ", remove=F) %>%
+  mutate(is_pilot_data = dt_date < PILOT_START_DATE) %>%
+  filter(!is_pilot_data) %>%
+  mutate(participant_id = as.character(ResponseId)) %>%
+  select(participant_id, ResponseId, everything())
+```
+
+## Split demographics into seperate dataset
+```{r}
+df_demo = qualtrics_df %>%
+select(ResponseId, participant_id, contains("demo"), -contains("timer"))
+
+knitr::kable(df_demo) %>% kableExtra::kable_paper(.)
+```
+
+## Split out survey metadata
+```{r}
+df_metadata = qualtrics_df %>%
+select(ResponseId, participant_id, contains("Date"), contains("duration"), contains("progress")) %>%
+  mutate(is_test_response = ifelse(`Duration (in seconds)` == 0, T, F))
+
+knitr::kable(df_metadata) %>% kableExtra::kable_paper(.)
+
+ggplot(df_metadata, aes(as.factor(Progress), `Duration (in seconds)`)) +
+  geom_boxplot() +
+  theme_bw()
+
+ggplot(df_metadata, aes(`Duration (in seconds)`)) +
+  geom_density() +
+  theme_bw()
+```
+
+## Split timer data into seperate dataset
+```{r}
+df_timings = qualtrics_df %>%
+select(ResponseId, contains("timer"))
+
+knitr::kable(df_timings) %>% kableExtra::kable_paper(.)
+
+knitr::kable(skimr::skim(df_timings)) %>% kableExtra::kable_paper(.)
+
+```
+
+## Score Attention Check data
+
+```{r}
+df_attentioncheck = qualtrics_df %>%
+  select(participant_id, contains("ac_"), stack_blocks) %>%
+  mutate(correct_imc = ifelse(ac_imc == "Green", T, F),
+         correct_nonsense = ifelse(ac_nonsense_1 == "Strongly Disagree", T, F),
+         correct_stackblocks = ifelse(stack_blocks == 3, T, F)) %>%
+  rowwise() %>%
+  mutate(n_correct_ac = sum(c(correct_imc, correct_nonsense, correct_stackblocks), na.rm=T)) %>%
+  mutate(prop_correct_ac = n_correct_ac/3) %>%
+  inner_join(df_metadata)
+
+ggplot(df_attentioncheck, aes(is_test_response, prop_correct_ac)) +
+    geom_boxplot()
+
+```
+
+## Visualize Image Heatmap 
+
+```{r}
+image_size = 500
+image_heatmap_downsampling = image_size/3
+df_imageheatmap = qualtrics_df %>%
+  select(participant_id, contains("heatmap")) %>%
+  pivot_longer(names_to="click", values_to = "location", heatmap_1_x:heatmap_6_y) %>%
+  mutate(click_ = gsub("heatmap","", click)) %>%
+  mutate(click_n = as.numeric(substr(click_,2,2))) %>%
+  mutate(is_x = grepl("_x", click_),
+         is_y = grepl("_y", click_)) %>%
+  mutate(x = ifelse(is_x, location, NA),
+         y = ifelse(is_y, location, NA)) %>%
+  select(-click_, -click, -location, -is_x, -is_y) %>%
+  mutate(x_ = lag(x)) %>%
+  mutate(is_coords_row = ifelse(!is.na(x_) & !is.na(y),T,F)) %>%
+  select(participant_id, click_n, x_, y) %>%
+  rename(`x` = x_) %>%
+  mutate(x_bin = cut(x, seq(0,image_size,image_heatmap_downsampling), labels = F),
+         y_bin = cut(y, seq(0,image_size,image_heatmap_downsampling), labels = F))
+
+ggplot(df_imageheatmap, aes(x, y, color=click_n)) +
+  geom_jitter(size=3) + 
+  xlim(0,500) +
+  ylim(0, 500) + 
+  theme_bw() +
+  scale_color_viridis_c()
+
+ggplot(df_imageheatmap, aes(x_bin, y_bin, fill=click_n)) +
+  geom_tile() + 
+  theme_bw() +
+  scale_fill_viridis_c() +
+  facet_grid(.~participant_id)
+         
+  
+```
+
+## Score TIPI data
+
+### Create reverse-scoring function
+
+```{r}
+reverse_code <- function(df, ques_label) {
+  out_df = df %>%
+    filter(tipi_question == ques_label) %>%
+    mutate(response_n = recode(response, 
+                               `Disagree strongly` = 7,
+                               `Disagree moderately` = 6, 
+                               `Disagree a little` = 5,
+                               `Neither agree nor disagree` = 4,
+                               `Agree a little` = 3, 
+                               `Agree moderately` = 2,
+                               `Agree strongly` = 1,
+                               .default=-999))
+  return(out_df)
+}
+```
+
+### Seperate TIPI data from main `qualtrics_df`
+
+```{r}
+# create TIPI dataset -----
+tipi_df = qualtrics_df %>%
+  select(ResponseId, contains("TIPI"), -contains("_Timer"))
+```
+
+### Transform TIPI from wide to long
+```{r}
+tipi_long = tipi_df %>%
+  pivot_longer(cols=TIPI_1:TIPI_10, names_to="tipi_question", values_to="response")
+```
+
+### Recode values
+```{r}
+tipi_long_r = tipi_long %>%
+  mutate(response_n = recode(response, 
+                             `Disagree strongly` = 1,
+                             `Disagree moderately` = 2, 
+                             `Disagree a little` = 3,
+                             `Neither agree nor disagree` = 4,
+                             `Agree a little` = 5, 
+                             `Agree moderately` = 6,
+                             `Agree strongly` = 7,
+                             .default=-999))
+
+```
+
+### Apply Reverse Coding
+
+NOTE: Extraversion: 1, 6R; Agreeableness: 2R, 7; Conscientiousness; 3, 8R; Emotional Stability: 4R, 9; Openness to Experiences: 5, 10R
+
+```{r}
+tipi_long_recode2 = reverse_code(tipi_long_r, "TIPI_2")
+tipi_long_recode4 = reverse_code(tipi_long_r, "TIPI_4")
+tipi_long_recode6 = reverse_code(tipi_long_r, "TIPI_6")
+tipi_long_recode8 = reverse_code(tipi_long_r, "TIPI_8")
+tipi_long_recode10 = reverse_code(tipi_long_r, "TIPI_10")
+
+tipi_long_nonrecoded = tipi_long_r %>%
+  filter(tipi_question %in% c("TIPI_1","TIPI_3","TIPI_5","TIPI_7","TIPI_9"))
+
+tipi_long_recode_all = bind_rows(tipi_long_nonrecoded,
+                                 tipi_long_recode2,
+                                 tipi_long_recode4,
+                                 tipi_long_recode6,
+                                 tipi_long_recode8,
+                                 tipi_long_recode10)
+```
+
+### Finally transform to wide format
+
+```{r}
+tipi_wide_recoded = tipi_long_recode_all %>%
+  select(-response) %>%
+  pivot_wider(names_from="tipi_question", values_from="response_n") %>%
+  rowwise() %>%
+  mutate(tipi_extraversion = mean(c(TIPI_1, TIPI_6), na.rm=T)) %>%
+  mutate(tipi_agreeableness = mean(c(TIPI_2, TIPI_7), na.rm=T),
+         tipi_conscientiousness = mean(c(TIPI_3, TIPI_8), na.rm=T),
+         tipi_emostability = mean(c(TIPI_4, TIPI_9), na.rm=T),
+         tipi_openexperience = mean(c(TIPI_5, TIPI_10), na.rm=T))
+
+# notice the parameter `ignore.case` = F, we want this since
+# we have both TIPI_* and tipi_* variables in our dataset.
+knitr::kable(tipi_wide_recoded %>% 
+select(contains("TIPI_", ignore.case = F))) %>% kableExtra::kable_paper(.)
+
+knitr::kable(tipi_wide_recoded %>% 
+select(contains("tipi_", ignore.case = F))) %>% kableExtra::kable_paper(.)
+```
