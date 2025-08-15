@@ -1,8 +1,8 @@
 # Qualtrics for Research Data Collection
 
   - ***Author:*** Nelson Roque, PhD
-  - [nelson.roque@ucf.edu](nelson.roque@ucf.edu)
-  - Director of the Context Lab at University of Central Florida
+  - [nur375@psu.edu](nur375@psu.edu)
+  - Director of the CASCADE Lab at The Pennsylvania State University
 
 -----
 
